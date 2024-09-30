@@ -5,7 +5,7 @@
 
 import unittest
 
-from fin_chatbot import fin_chatbot
+from fin_chatbot import api
 
 
 class TestFin_chatbot(unittest.TestCase):

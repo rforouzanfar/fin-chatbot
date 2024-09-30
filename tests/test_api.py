@@ -1,5 +1,5 @@
 import unittest
-from fin_chatbot import create_app
+from src.my_python_project.api import create_app
 
 class TestAPI(unittest.TestCase):
     def setUp(self):
