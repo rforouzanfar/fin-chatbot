@@ -20,6 +20,21 @@ STOCKS_STORED = Gauge('stocks_stored_total', 'Total number of stocks stored in R
 
 FETCH_ALL_STOCKS = os.getenv('FETCH_ALL_STOCKS', 'False').lower() == 'true'
 API_CALLS_PER_MINUTE = 60  # Finnhub free tier limit
+FETCH_INTERVAL_MINUTES = float(os.getenv('FETCH_INTERVAL_MINUTES', 15))
+
+async def fetch_stocks(redis_processor, max_calls):
+    common_total, common_fetched, common_failed, common_stored = await redis_processor.process_common_stocks(max_calls=max_calls)
+    
+    if FETCH_ALL_STOCKS and max_calls > common_fetched + common_failed:
+        batch = redis_processor.get_next_batch_of_stocks()
+        all_total, all_fetched, all_failed = await redis_processor.process_stocks_async(
+            batch,
+            max_calls=max_calls - (common_fetched + common_failed)
+        )
+    else:
+        all_total, all_fetched, all_failed = 0, 0, 0
+    
+    return common_total, common_fetched, common_failed, common_stored, all_total, all_fetched, all_failed
 
 async def main():
     # Start Prometheus metrics server
@@ -39,26 +54,15 @@ async def main():
             api_calls_this_minute = 0
             last_reset_time = current_time
 
-        logger.info(f"Starting scheduled fetch (every {redis_processor.fetch_interval_minutes} minutes)")
+        logger.info(f"Starting scheduled fetch (every {FETCH_INTERVAL_MINUTES} minutes)")
 
         try:
-            # Process common stocks
-            common_total, common_fetched, common_failed, common_stored = await redis_processor.process_common_stocks(
-                max_calls=API_CALLS_PER_MINUTE - api_calls_this_minute
+            common_total, common_fetched, common_failed, common_stored, all_total, all_fetched, all_failed = await fetch_stocks(
+                redis_processor, 
+                API_CALLS_PER_MINUTE - api_calls_this_minute
             )
-            api_calls_this_minute += common_fetched + common_failed
-
-            # Process next batch of all stocks if configured and within rate limit
-            if FETCH_ALL_STOCKS and api_calls_this_minute < API_CALLS_PER_MINUTE:
-                batch = redis_processor.get_next_batch_of_stocks()
-                all_total, all_fetched, all_failed = await redis_processor.process_stocks_async(
-                    batch,
-                    max_calls=API_CALLS_PER_MINUTE - api_calls_this_minute
-                )
-                api_calls_this_minute += all_fetched + all_failed
-            else:
-                all_total, all_fetched, all_failed = 0, 0, 0
-
+            
+            api_calls_this_minute += common_fetched + common_failed + all_fetched + all_failed
             all_stored = redis_manager.get_total_stored_stocks()
 
             # Update Prometheus metrics
@@ -74,10 +78,10 @@ async def main():
             logger.info(f"API calls this minute: {api_calls_this_minute}")
 
         except Exception as e:
-            logger.error(f"An error occurred during the fetch process: {e}")
+            logger.error(f"An error occurred during the fetch process: {e}", exc_info=True)
 
         # Calculate sleep time to respect the fetch interval
-        sleep_time = max(0, redis_processor.fetch_interval_minutes * 60 - (time.time() - current_time))
+        sleep_time = max(0, FETCH_INTERVAL_MINUTES * 60 - (time.time() - current_time))
         await asyncio.sleep(sleep_time)
 
 if __name__ == "__main__":

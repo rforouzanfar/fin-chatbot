@@ -44,12 +44,12 @@ class RedisManager:
         except redis.RedisError as e:
             logger.error(f"Redis error setting key {key}: {e}")
 
-    def symbol_exists(self, symbol):
-        try:
-            return self.redis.exists(f"stock:{symbol}")
-        except redis.RedisError as e:
-            logger.error(f"Redis error checking if symbol {symbol} exists: {e}")
-            return False
+    # def symbol_exists(self, symbol):
+    #     try:
+    #         return self.redis.exists(f"stock:{symbol}")
+    #     except redis.RedisError as e:
+    #         logger.error(f"Redis error checking if symbol {symbol} exists: {e}")
+    #         return False
     
     def set_stock_price(self, symbol, price, timestamp=None):
         try:
@@ -83,12 +83,12 @@ class RedisManager:
             logger.error(f"Redis error getting all symbols: {e}")
             return []
 
-    def cache_stock_list(self, exchange, stocks):
-        try:
-            self.redis.set(f"stocklist:{exchange}", json.dumps(stocks))
-            logger.info(f"Cached stock list for exchange {exchange}")
-        except redis.RedisError as e:
-            logger.error(f"Redis error caching stock list for {exchange}: {e}")
+    # def cache_stock_list(self, exchange, stocks):
+    #     try:
+    #         self.redis.set(f"stocklist:{exchange}", json.dumps(stocks))
+    #         logger.info(f"Cached stock list for exchange {exchange}")
+    #     except redis.RedisError as e:
+    #         logger.error(f"Redis error caching stock list for {exchange}: {e}")
 
     def get_cached_stock_list(self, exchange):
         try:
@@ -103,16 +103,25 @@ class RedisManager:
     def get_total_stored_stocks(self):
         return len(self.get_all_symbols())
 
-    def get_all_keys(self, pattern):
-        try:
-            return self.redis.keys(pattern)
-        except redis.RedisError as e:
-            logger.error(f"Redis error getting keys with pattern {pattern}: {e}")
-            return []
+    # def get_all_keys(self, pattern):
+    #     try:
+    #         return self.redis.keys(pattern)
+    #     except redis.RedisError as e:
+    #         logger.error(f"Redis error getting keys with pattern {pattern}: {e}")
+    #         return []
 
-    def delete_keys(self, keys):
+    # def delete_keys(self, keys):
+    #     try:
+    #         return self.redis.delete(*keys)
+    #     except redis.RedisError as e:
+    #         logger.error(f"Redis error deleting keys: {e}")
+    #         return 0
+    
+    def delete_stock_data(self, symbol):
         try:
-            return self.redis.delete(*keys)
-        except redis.RedisError as e:
-            logger.error(f"Redis error deleting keys: {e}")
-            return 0
+            keys_to_delete = [f"stock:{symbol}", f"stock:{symbol}:price"]
+            deleted = self.redis.delete(*keys_to_delete)
+            return deleted > 0
+        except Exception as e:
+            logger.error(f"Error deleting data for {symbol}: {e}")
+            return False

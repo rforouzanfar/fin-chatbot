@@ -16,12 +16,15 @@ class PostgresProcessor:
         self.postgres_manager = PostgresManager()
         self.redis_manager = RedisManager()
         self.redis_processor = RedisProcessor(self.redis_manager)
+        self.batch_size = 30  # Adjusted for Finnhub free tier
 
     def initialize_database(self):
         try:
+            self.postgres_manager.create_pool()
             self.postgres_manager.create_database()
-            self.postgres_manager.connect()
-            self.postgres_manager.create_table()
+            self.postgres_manager.create_tables()
+            self.postgres_manager.create_indexes()
+            logger.info("Database initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
             raise
@@ -31,6 +34,7 @@ class PostgresProcessor:
         today = datetime.now().date()
         inserted_count = 0
         error_count = 0
+        batch = []
 
         for symbol in symbols:
             try:
@@ -38,8 +42,11 @@ class PostgresProcessor:
                 if price is not None and timestamp is not None:
                     date = datetime.fromtimestamp(timestamp).date()
                     if date == today:
-                        if self.postgres_manager.insert_stock_price(symbol, date, price):
-                            inserted_count += 1
+                        batch.append((symbol, date, price))
+                        if len(batch) >= self.batch_size:
+                            self.postgres_manager.batch_insert_stock_prices(batch)
+                            inserted_count += len(batch)
+                            batch = []
                     else:
                         logger.warning(f"Skipping {symbol}: Latest price is not from today")
                 else:
@@ -47,6 +54,11 @@ class PostgresProcessor:
             except Exception as e:
                 logger.error(f"Error processing {symbol}: {e}")
                 error_count += 1
+
+        # Insert any remaining records in the batch
+        if batch:
+            self.postgres_manager.batch_insert_stock_prices(batch)
+            inserted_count += len(batch)
 
         logger.info(f"Daily update completed. Inserted/updated {inserted_count} records. Errors: {error_count}")
         return inserted_count, error_count
@@ -68,12 +80,10 @@ class PostgresProcessor:
         filled_count = 0
         for symbol, dates in missing_data:
             for date in dates:
-                # Here you would implement logic to fetch the missing data
-                # For example, you could use the Redis cache or an external API
                 price = self.fetch_historical_price(symbol, date)
                 if price is not None:
-                    if self.postgres_manager.insert_stock_price(symbol, date, price):
-                        filled_count += 1
+                    self.postgres_manager.batch_insert_stock_prices([(symbol, date, price)])
+                    filled_count += 1
                 else:
                     logger.warning(f"Could not fetch price for {symbol} on {date}")
         
@@ -83,9 +93,12 @@ class PostgresProcessor:
     def fetch_historical_price(self, symbol, date):
         # Implement this method to fetch historical price data
         # This could involve using an external API or your Redis cache
-        # For now, we'll return None as a placeholder
         logger.warning(f"fetch_historical_price not implemented. Couldn't fetch price for {symbol} on {date}")
         return None
+
+    def update_metrics(self):
+        logger.info("Updating metrics for all symbols")
+        self.postgres_manager.update_all_metrics()
 
     def run_daily_update(self):
         logger.info("Starting daily update of stock prices in PostgreSQL")
@@ -104,6 +117,9 @@ class PostgresProcessor:
                 filled_count = self.fill_missing_data(missing_data)
                 logger.info(f"Filled {filled_count} missing data points")
             
+            # Update metrics
+            self.update_metrics()
+            
             # Cleanup old data
             deleted_count = self.postgres_manager.cleanup_old_data()
             logger.info(f"Cleaned up {deleted_count} old records")
@@ -111,7 +127,7 @@ class PostgresProcessor:
         except Exception as e:
             logger.error(f"Error during daily update: {e}")
         finally:
-            self.postgres_manager.close_connection()
+            self.postgres_manager.close_pool()
 
 if __name__ == "__main__":
     processor = PostgresProcessor()

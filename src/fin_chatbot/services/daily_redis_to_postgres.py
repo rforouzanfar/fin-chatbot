@@ -41,7 +41,9 @@ def main():
         postgres_manager.connect()
         postgres_manager.create_database()
         postgres_manager.create_table()
+        postgres_manager.create_metrics_table()
         transfer_to_postgres(redis_manager, postgres_manager)
+        postgres_manager.update_all_metrics()
     except Exception as e:
         logger.error(f"Failed to transfer data to PostgreSQL: {e}")
     finally:
