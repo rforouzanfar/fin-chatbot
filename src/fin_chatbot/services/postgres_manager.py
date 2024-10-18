@@ -24,12 +24,45 @@ class PostgresManager:
             'port': os.getenv('POSTGRES_PORT')
         }
 
+    def initialize_database(self):
+        logger.info("Starting database initialization")
+        try:
+            # Connect to default 'postgres' database to create user and new database
+            conn = psycopg2.connect(**self.db_params)
+            conn.autocommit = True
+            cur = conn.cursor()
+
+            # Create database if not exists
+            cur.execute(sql.SQL("SELECT 1 FROM pg_database WHERE datname = %s"), (self.db_params['dbname'],))
+            if cur.fetchone() is None:
+                # If the database doesn't exist, create it
+                cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(self.db_params['dbname'])))
+                logger.info(f"Database {self.db_params['dbname']} created successfully")
+            else:
+                logger.info(f"Database {self.db_params['dbname']} already exists")
+
+            cur.close()
+            conn.close()
+
+            # Connect to the new database to create tables and indexes
+            logger.info("Creating connection pool")
+            self.create_pool()
+            logger.info("Creating tables")
+            self.create_tables()
+            logger.info("Creating indexes")
+            self.create_indexes()
+            logger.info("Database initialization completed successfully")
+
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+            raise
+
     def create_pool(self, minconn=1, maxconn=10):
         try:
             self.pool = pool.SimpleConnectionPool(minconn, maxconn, **self.db_params)
             logger.info("Connection pool created successfully")
         except (Exception, psycopg2.Error) as error:
-            logger.error(f"Error creating connection pool: {error}")
+            logger.error(f"Error creating connection pool: {error}", exc_info=True)
             raise
 
     @contextmanager
@@ -58,25 +91,6 @@ class PostgresManager:
         if self.pool:
             self.pool.closeall()
             logger.info("All database connections closed")
-
-    def create_database(self):
-        conn = psycopg2.connect(
-            dbname='postgres',
-            user=self.db_params['user'],
-            password=self.db_params['password'],
-            host=self.db_params['host'],
-            port=self.db_params['port']
-        )
-        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
-        with conn.cursor() as cursor:
-            cursor.execute(f"SELECT 1 FROM pg_catalog.pg_database WHERE datname = %s", (self.db_params['dbname'],))
-            exists = cursor.fetchone()
-            if not exists:
-                cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(self.db_params['dbname'])))
-                logger.info(f"Database '{self.db_params['dbname']}' created successfully")
-            else:
-                logger.info(f"Database '{self.db_params['dbname']}' already exists")
-        conn.close()
 
     def create_tables(self):
         with self.get_cursor() as cursor:
@@ -123,10 +137,10 @@ class PostgresManager:
             execute_batch(cursor, '''
                 INSERT INTO stock_prices (symbol, date, closing_price)
                 VALUES (%s, %s, %s)
-                ON CONFLICT (symbol, date) DO UPDATE
-                SET closing_price = EXCLUDED.closing_price
+                ON CONFLICT (symbol, date) 
+                DO UPDATE SET closing_price = EXCLUDED.closing_price
             ''', data)
-        logger.info(f"Batch inserted {len(data)} stock prices")
+        logger.info(f"Batch inserted/updated {len(data)} stock prices")
 
     def get_stock_prices(self, symbol, start_date, end_date):
         with self.get_cursor(commit=False) as cursor:
@@ -168,45 +182,20 @@ class PostgresManager:
         logger.info(f"Deleted {deleted_count} records older than {days} days")
         return deleted_count
 
-
-    def calculate_metrics(self, symbol, end_date):
-        try:
-            five_years_ago = end_date - timedelta(days=5*365)
-            prices = self.get_stock_prices(symbol, five_years_ago, end_date)
-            if not prices:
-                logger.warning(f"No price data available for {symbol}")
-                return None
-
-            dates, close_prices = zip(*prices)
-            close_prices = np.array(close_prices)
-
-            return {
-                'date': end_date,
-                'cagr_1y': self._calculate_cagr(close_prices[-252:]),
-                'cagr_3y': self._calculate_cagr(close_prices[-756:]),
-                'cagr_5y': self._calculate_cagr(close_prices),
-                'volatility_1y': self._calculate_volatility(close_prices[-252:]),
-                'ma_50': np.mean(close_prices[-50:]),
-                'ma_200': np.mean(close_prices[-200:]),
-                'rsi_14': self._calculate_rsi(close_prices, 14),
-                'beta_1y': self._calculate_beta(symbol, dates[-252:], close_prices[-252:]),
-                'sharpe_ratio_1y': self._calculate_sharpe_ratio(close_prices[-252:]),
-                'max_drawdown_1y': self._calculate_max_drawdown(close_prices[-252:])
-            }
-        except Exception as e:
-            logger.error(f"Error calculating metrics for {symbol}: {e}")
-            return None
-
     def _calculate_volatility(self, prices):
-        returns = np.diff(np.log(prices))
-        return np.std(returns) * np.sqrt(252)
+        if len(prices) < 2:
+            return None
+        returns = np.diff(np.log(np.where(prices > 0, prices, np.nan)))
+        return np.nanstd(returns) * np.sqrt(252)
 
     def _calculate_rsi(self, prices, window):
+        if len(prices) < window + 1:
+            return None
         deltas = np.diff(prices)
         seed = deltas[:window+1]
         up = seed[seed >= 0].sum()/window
         down = -seed[seed < 0].sum()/window
-        rs = up/down
+        rs = up/down if down != 0 else 0
         rsi = np.zeros_like(prices)
         rsi[:window] = 100. - 100./(1. + rs)
 
@@ -221,11 +210,53 @@ class PostgresManager:
 
             up = (up*(window - 1) + upval)/window
             down = (down*(window - 1) + downval)/window
-            rs = up/down
+            rs = up/down if down != 0 else 0
             rsi[i] = 100. - 100./(1. + rs)
 
         return rsi[-1]
 
+    def _calculate_sharpe_ratio(self, prices, risk_free_rate=0.02):
+        if len(prices) < 2:
+            return None
+        returns = np.diff(prices) / prices[:-1]
+        excess_returns = returns - risk_free_rate/252
+        if np.isnan(excess_returns).all() or len(excess_returns) == 0:
+            return None
+        return np.sqrt(252) * np.nanmean(excess_returns) / np.nanstd(excess_returns)
+
+    def calculate_metrics(self, symbol, end_date):
+        try:
+            five_years_ago = end_date - timedelta(days=5*365)
+            prices = self.get_stock_prices(symbol, five_years_ago, end_date)
+            if not prices or len(prices) < 2:
+                logger.warning(f"Insufficient price data available for {symbol}")
+                return None
+
+            dates, close_prices = zip(*prices)
+            close_prices = np.array([float(price) for price in close_prices if price is not None and price > 0])
+
+            if len(close_prices) < 2:
+                logger.warning(f"Insufficient valid price data for {symbol}")
+                return None
+
+            return {
+                'date': end_date,
+                'cagr_1y': self._calculate_cagr(close_prices[-min(252, len(close_prices)):]),
+                'cagr_3y': self._calculate_cagr(close_prices[-min(756, len(close_prices)):]),
+                'cagr_5y': self._calculate_cagr(close_prices),
+                'volatility_1y': self._calculate_volatility(close_prices[-min(252, len(close_prices)):]),
+                'ma_50': np.mean(close_prices[-min(50, len(close_prices)):]),
+                'ma_200': np.mean(close_prices[-min(200, len(close_prices)):]),
+                'rsi_14': self._calculate_rsi(close_prices, 14),
+                'beta_1y': self._calculate_beta(symbol, dates[-min(252, len(dates)):], close_prices[-min(252, len(close_prices)):]),
+                'sharpe_ratio_1y': self._calculate_sharpe_ratio(close_prices[-min(252, len(close_prices)):]),
+                'max_drawdown_1y': self._calculate_max_drawdown(close_prices[-min(252, len(close_prices)):])
+            }
+        except Exception as e:
+            logger.error(f"Error calculating metrics for {symbol}: {e}")
+            return None
+
+    
     def _calculate_beta(self, symbol, dates, prices):
         # Improved beta calculation (placeholder - needs market data)
         market_prices = self._get_market_prices(dates)  # Implement this method
@@ -239,16 +270,6 @@ class PostgresManager:
         market_variance = np.var(market_returns)
         
         return covariance / market_variance if market_variance != 0 else None
-
-    def _get_market_prices(self, dates):
-        # Placeholder method - implement to fetch market index prices
-        # You might want to store market index data in a separate table
-        return None
-
-    def _calculate_sharpe_ratio(self, prices, risk_free_rate=0.02):
-        returns = np.diff(prices) / prices[:-1]
-        excess_returns = returns - risk_free_rate/252
-        return np.sqrt(252) * excess_returns.mean() / excess_returns.std()
 
     def _calculate_max_drawdown(self, prices):
         peak = prices[0]
@@ -307,3 +328,9 @@ class PostgresManager:
         with self.get_cursor(commit=False) as cursor:
             cursor.execute("SELECT DISTINCT symbol FROM stock_prices")
             return [row[0] for row in cursor.fetchall()]
+
+    def _calculate_cagr(self, prices):
+        if len(prices) < 2:
+            return None
+        years = len(prices) / 252  # Assuming 252 trading days in a year
+        return (prices[-1] / prices[0]) ** (1/years) - 1
