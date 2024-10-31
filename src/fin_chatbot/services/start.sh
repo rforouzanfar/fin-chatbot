@@ -1,26 +1,22 @@
-#!/bin/sh
+#!/bin/bash
 
-# Check if cron is already running
-if ! pgrep -x "cron" > /dev/null
-then
-    # Start the cron daemon
-    /usr/sbin/cron
-    echo "Cron daemon started" >> /var/log/cron.log
-else
-    echo "Cron daemon is already running" >> /var/log/cron.log
-fi
+# Create log directory if it doesn't exist
+mkdir -p /var/log
 
-# Function to run the scheduled fetch script
-run_scheduled_fetch() {
-    while true; do
-        python /fin_chatbot/scheduled_fetch_to_redis.py >> /var/log/scheduled_fetch.log 2>&1
-        echo "scheduled_fetch_to_redis.py exited, restarting in 5 seconds..." >> /var/log/scheduled_fetch.log
-        sleep 5
-    done
-}
+# Create log files if they don't exist
+touch /var/log/cron.log
+touch /var/log/scheduled_fetch.log
+chmod 0644 /var/log/cron.log /var/log/scheduled_fetch.log
 
-# Run the scheduled fetch script in the background
-run_scheduled_fetch &
+# Kill any existing cron processes
+pkill cron || true
 
-# Tail both log files to keep the container running and see output
-tail -f /var/log/cron.log /var/log/scheduled_fetch.log
+# Clear any previous log entries
+> /var/log/cron.log
+
+# Start cron in foreground mode
+/usr/sbin/cron -f &
+echo "$(date): Single cron daemon initialized" >> /var/log/cron.log
+
+# Tail logs
+exec tail -f /var/log/cron.log /var/log/scheduled_fetch.log
